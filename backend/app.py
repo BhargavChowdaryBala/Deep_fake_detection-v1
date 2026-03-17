@@ -148,11 +148,16 @@ class DeepfakeDetector:
         if not weights_path:
             repo_id = os.environ.get('HF_REPO_ID')
             filename = os.environ.get('HF_FILENAME', 'convnext_video_fixed.pth')
+            repo_type = os.environ.get('HF_REPO_TYPE', 'model') # Default to model, allow 'space'
             
             if repo_id:
                 try:
-                    print(f"DEBUG: Local weights missing. Attempting to download from HF: {repo_id}...")
-                    weights_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                    print(f"DEBUG: Local weights missing. Attempting to download from HF ({repo_type}): {repo_id}...")
+                    weights_path = hf_hub_download(
+                        repo_id=repo_id, 
+                        filename=filename, 
+                        repo_type=repo_type
+                    )
                     print(f"DEBUG: Successfully downloaded weights to {weights_path}")
                 except Exception as e:
                     print(f"DEBUG: HF Download Failed: {e}")
