@@ -215,11 +215,34 @@ class DeepfakeDetector:
             traceback.print_exc()
             raise e
 
-detector = DeepfakeDetector()
+# --- Lazy Loaders for Heavy Objects ---
+_detector_instance = None
+_face_mesh_instance = None
+_detector_lock = threading.Lock()
+_mesh_lock = threading.Lock()
 
-# --- MediaPipe Biometrics ---
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh_instance = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True)
+def get_detector():
+    global _detector_instance
+    with _detector_lock:
+        if _detector_instance is None:
+            print("DEBUG: Initializing DeepfakeDetector (First Use)...")
+            _detector_instance = DeepfakeDetector()
+    return _detector_instance
+
+def get_face_mesh():
+    global _face_mesh_instance
+    with _mesh_lock:
+        if _face_mesh_instance is None:
+            print("DEBUG: Initializing MediaPipe FaceMesh (First Use)...")
+            mp_face_mesh = mp.solutions.face_mesh
+            _face_mesh_instance = mp_face_mesh.FaceMesh(
+                static_image_mode=False, 
+                max_num_faces=1, 
+                refine_landmarks=True
+            )
+    return _face_mesh_instance
+
+# (Removed global instances to prevent startup blocking)
 
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
@@ -248,6 +271,11 @@ def calculate_mar(landmarks, indices):
 def analyze_facial_forensics(face_img):
     if face_img is None or face_img.size == 0:
         return {"spectral": 0, "texture": 0}
+    
+    # The instruction adds this line, but it's not used in the original function logic.
+    # Keeping it as per instruction, but it might be a partial change.
+    results = get_face_mesh().process(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)) 
+
     # 1. Spectral
     gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
     gray_resized = cv2.resize(gray, (128, 128))
@@ -391,7 +419,7 @@ def process_video_task(job_id, filepath):
             frame = cv2.imread(filepath)
             if frame is not None:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh_instance.process(rgb_frame)
+                results = get_face_mesh().process(rgb_frame)
                 
                 engine = FusionEngine()
                 
@@ -403,7 +431,7 @@ def process_video_task(job_id, filepath):
                     pts = np.array([[l.x * w, l.y * h] for l in landmarks])
                     x, y, fw, fh = cv2.boundingRect(pts.astype(np.int32))
                     face_crop = frame[max(0, y-10):min(h, y+fh+10), max(0, x-10):min(w, x+fw+10)]
-                    neural_prob = detector.predict(face_crop)
+                    neural_prob = get_detector().predict(face_crop)
                     
                     # 2. Biometric Signal (Layer B - Static)
                     # For images, we can only check spectral/texture forensics
@@ -451,7 +479,7 @@ def process_video_task(job_id, filepath):
                 
                 timestamp = i / fps
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh_instance.process(rgb_frame)
+                results = get_face_mesh().process(rgb_frame)
                 
                 if results.multi_face_landmarks:
                     landmarks = results.multi_face_landmarks[0].landmark
