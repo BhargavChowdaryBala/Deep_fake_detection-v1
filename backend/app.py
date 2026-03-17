@@ -11,6 +11,7 @@ import threading
 import uuid
 import time
 from collections import deque
+from huggingface_hub import hf_hub_download
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
@@ -161,6 +162,8 @@ class DeepfakeDetector:
                     print(f"DEBUG: Successfully downloaded weights to {weights_path}")
                 except Exception as e:
                     print(f"DEBUG: HF Download Failed: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         try:
             if weights_path:
