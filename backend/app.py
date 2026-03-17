@@ -448,7 +448,7 @@ def process_video_task(job_id, filepath):
                     timeline.append({"time": 0, "event": "Face detected: Triple-Layer Fusion applied"})
                 else:
                     # Fallback if no face detected
-                    neural_prob = detector.predict(frame)
+                    neural_prob = get_detector().predict(frame)
                     fake_probs.append(neural_prob)
                     timeline.append({"time": 0, "event": "No face found; analyzing full frame"})
                 
@@ -489,7 +489,7 @@ def process_video_task(job_id, filepath):
                     pts = np.array([[l.x * w, l.y * h] for l in landmarks])
                     bx, by, bw, bh = cv2.boundingRect(pts.astype(np.int32))
                     face_crop = frame[max(0, by-10):min(h, by+bh+10), max(0, bx-10):min(w, bx+bw+10)]
-                    neural_prob = detector.predict(face_crop)
+                    neural_prob = get_detector().predict(face_crop)
                     
                     # 2. Biometric Signal (Layer B)
                     ears.append(calculate_ear(landmarks, LEFT_EYE, RIGHT_EYE))
