@@ -41,9 +41,18 @@ Thumbs.db
 backend/uploads/
 convnext_video.pth
 convnext_video.pth (1).zip
+convnext_video_fixed.pth
 *.mp4
 *.mov
 *.avi
+*.pth
+*.zip
 *.json
 !package.json
 !tsconfig.json
+.gemini/
+.agents/
+.agent/
+_agents/
+_agent/
+brain/

@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Loader2, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-const API_BASE = 'http://localhost:5000';
+// In production, point to your deployed backend URL via environment variable
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 export default function AnalyzeButton({ inputData, onResult, file, url, activeTab }) {
   const [loading, setLoading] = useState(false);
@@ -91,7 +92,9 @@ export default function AnalyzeButton({ inputData, onResult, file, url, activeTa
             riskScore: resultData.risk_score,
             anomalies: resultData.anomalies,
             avgFakeProb: resultData.avg_fake_prob,
-            forensicReport: resultData.forensic_report
+            forensicReport: resultData.forensic_report,
+            temporalData: resultData.temporal_data,
+            forensicNotes: resultData.forensic_notes
         };
 
         // Save to history

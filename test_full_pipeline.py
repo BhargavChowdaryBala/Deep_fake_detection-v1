@@ -44,6 +44,7 @@ if __name__ == "__main__":
         print("\nANALYSIS COMPLETED")
         print(f"Risk Score: {job['result']['risk_score']}%")
         print(f"Anomalies: {job['result']['anomalies']}")
+        print(f"Forensic Notes: {job['result'].get('forensic_notes', [])}")
     else:
         print(f"\nANALYSIS FAILED: {job.get('error', 'Unknown Error')}")
     

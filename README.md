@@ -1,3 +1,15 @@
+---
+title: DeepShield AI
+emoji: 🛡️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: 4.12.0
+app_file: app.py
+pinned: false
+python_version: 3.10.12
+---
+
 # Deepfake Detection System
 
 A Real-Time Video Deepfake Detection Pipeline processing frames through a custom `convnext_video.pth` PyTorch model and MediaPipe behavioral analysis.

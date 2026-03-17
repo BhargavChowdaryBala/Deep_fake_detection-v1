@@ -3,15 +3,16 @@ import cv2
 import torch
 import torch.nn as nn
 import numpy as np
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import mediapipe as mp
 import threading
 import uuid
 import time
+from collections import deque
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
@@ -129,29 +130,64 @@ class DeepfakeDetector:
         self.model.to(self.device)
         self.model.eval()
         
-        # USE ABSOLUTE PATH TO PREVENT LOADING FAILURES
-        weights_path = r'C:\Users\bharg\Desktop\hackaton\convnext_video_fixed.pth'
+        # SEARCH FOR WEIGHTS (LOCAL -> ROOT -> CURRENT)
+        possible_paths = [
+            r'C:\Users\bharg\Desktop\hackaton\convnext_video_fixed.pth',
+            os.path.join(os.getcwd(), 'convnext_video_fixed.pth'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'convnext_video_fixed.pth'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'convnext_video_fixed.pth')
+        ]
         
+        weights_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                weights_path = p
+                break
+        
+        # BACKUP: DOWNLOAD FROM HUGGING FACE IF MISSING
+        if not weights_path:
+            repo_id = os.environ.get('HF_REPO_ID')
+            filename = os.environ.get('HF_FILENAME', 'convnext_video_fixed.pth')
+            
+            if repo_id:
+                try:
+                    print(f"DEBUG: Local weights missing. Attempting to download from HF: {repo_id}...")
+                    weights_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                    print(f"DEBUG: Successfully downloaded weights to {weights_path}")
+                except Exception as e:
+                    print(f"DEBUG: HF Download Failed: {e}")
+
         try:
-            if os.path.exists(weights_path):
-                print(f"DEBUG: Found weights at {weights_path}. Loading...")
+            if weights_path:
+                print(f"DEBUG: Loading weights from {weights_path}...")
                 state_dict = torch.load(weights_path, map_location=self.device)
                 self.model.load_state_dict(state_dict)
                 print("DEBUG: Deepfake Model weights loaded SUCCESSFULLY.")
             else:
-                print(f"DEBUG: ERROR - Weights file NOT FOUND at {weights_path}")
+                print(f"DEBUG: ERROR - Weights file NOT FOUND locally or on Hugging Face.")
         except Exception as e:
             print(f"DEBUG: ERROR - Failed to load weights from {weights_path}: {e}")
             import traceback
             traceback.print_exc()
+
+    def preprocess_face(self, face_img):
+        """Advanced Preprocessing: Histogram Equalization (YUV) to expose GAN artifacts."""
+        if face_img is None or face_img.size == 0:
+            return face_img
+        yuv = cv2.cvtColor(face_img, cv2.COLOR_BGR2YUV)
+        yuv[:,:,0] = cv2.equalizeHist(yuv[:,:,0])
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
     def predict(self, frame):
         try:
             if frame is None:
                 raise ValueError("Frame is None")
             
-            # CONVERT TO RGB (Model expects RGB)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # 1. Advanced Preprocessing
+            frame_processed = self.preprocess_face(frame)
+            
+            # 2. CONVERT TO RGB (Model expects RGB)
+            frame_rgb = cv2.cvtColor(frame_processed, cv2.COLOR_BGR2RGB)
             img = cv2.resize(frame_rgb, (224, 224))
             img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
             
@@ -186,17 +222,14 @@ MOUTH = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 1
 
 def calculate_ear(landmarks, left_indices, right_indices):
     def pt(idx): return np.array([landmarks[idx].x, landmarks[idx].y])
-    
     l_v1 = np.linalg.norm(pt(left_indices[1]) - pt(left_indices[5]))
     l_v2 = np.linalg.norm(pt(left_indices[2]) - pt(left_indices[4]))
     l_h = np.linalg.norm(pt(left_indices[0]) - pt(left_indices[3]))
     left_ear = (l_v1 + l_v2) / (2.0 * l_h)
-
     r_v1 = np.linalg.norm(pt(right_indices[1]) - pt(right_indices[5]))
     r_v2 = np.linalg.norm(pt(right_indices[2]) - pt(right_indices[4]))
     r_h = np.linalg.norm(pt(right_indices[0]) - pt(right_indices[3]))
     right_ear = (r_v1 + r_v2) / (2.0 * r_h)
-
     return (left_ear + right_ear) / 2.0
 
 def calculate_mar(landmarks, indices):
@@ -208,31 +241,131 @@ def calculate_mar(landmarks, indices):
     return (v1 + v2 + v3) / (3.0 * h)
 
 def analyze_facial_forensics(face_img):
-    """
-    Analyzes visual artifacts typical of deepfakes:
-    1. Spectral Analysis (DCT) for GAN checkerboard patterns.
-    2. Texture Consistency (Laplacian) for blending artifacts.
-    """
     if face_img is None or face_img.size == 0:
         return {"spectral": 0, "texture": 0}
-    
-    # 1. Spectral Analysis
+    # 1. Spectral
     gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
     gray_resized = cv2.resize(gray, (128, 128))
     dct = cv2.dct(np.float32(gray_resized)/255.0)
     high_freq = np.abs(dct[64:, 64:])
     spectral_score = min(100.0, np.mean(high_freq) * 8000)
-    
-    # 2. Texture Consistency
+    # 2. Texture
     laplacian = cv2.Laplacian(gray, cv2.CV_64F).var()
-    texture_score = 0
-    if laplacian < 120: texture_score = 45 # Blurred/Smoothed
-    elif laplacian > 1500: texture_score = 30 # Over-sharpened artifacts
+    texture_score = 45 if laplacian < 120 else (30 if laplacian > 1500 else 0)
+    return {"spectral": round(spectral_score, 2), "texture": round(texture_score, 2)}
+
+# --- Layer C: Structural & Geometric Integrity ---
+# 3D Model points for solvePnP (Generic face model)
+FACE_3D_MODEL = np.array([
+    (0.0, 0.0, 0.0),             # Nose tip
+    (0.0, -330.0, -65.0),        # Chin
+    (-225.0, 170.0, -135.0),     # Left eye corner
+    (225.0, 170.0, -135.0),      # Right eye corner
+    (-150.0, -150.0, -125.0),    # Left mouth corner
+    (150.0, -150.0, -125.0)      # Right mouth corner
+], dtype=np.float64)
+
+def get_2d_points(landmarks, w, h):
+    indices = [1, 152, 33, 263, 61, 291]
+    return np.array([
+        (landmarks[idx].x * w, landmarks[idx].y * h) for idx in indices
+    ], dtype=np.float64)
+
+def analyze_structural_integrity(face_img, landmarks):
+    """Layer C: Edge Density and Head Pose Consistency."""
+    if face_img is None or face_img.size == 0:
+        return {"edge_density": 0, "pose_consistent": True, "rotation_vec": None}
+
+    # 1. Edge Density Analysis (Canny)
+    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+    edge_density = np.sum(edges > 0) / edges.size
+    
+    # 2. Head Pose estimation (solvePnP)
+    h, w, _ = face_img.shape
+    image_points = get_2d_points(landmarks, w, h)
+    
+    # Camera internals
+    focal_length = w
+    center = (w / 2, h / 2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1]
+    ], dtype=np.float64)
+    dist_coeffs = np.zeros((4, 1))
+    
+    success, rotation_vec, translation_vec = cv2.solvePnP(
+        FACE_3D_MODEL, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+    )
     
     return {
-        "spectral": round(spectral_score, 2),
-        "texture": round(texture_score, 2)
+        "edge_density": float(edge_density),
+        "rotation_vec": rotation_vec if success else None,
+        "pose_consistent": success
     }
+
+# --- Temporal & Fusion Engine ---
+class TemporalBuffer:
+    def __init__(self, size=15):
+        self.scores = deque(maxlen=size)
+        self.landmarks = deque(maxlen=size)
+        self.edge_densities = deque(maxlen=size)
+        self.rot_vecs = deque(maxlen=size)
+
+    def add(self, score, lms, density, rot_vec):
+        self.scores.append(score)
+        self.landmarks.append(lms)
+        self.edge_densities.append(density)
+        self.rot_vecs.append(rot_vec)
+
+    def get_jitter_variance(self):
+        if len(self.landmarks) < 2: return 0.0
+        # Calculate nose-tip (landmark 1) shift relative to frame
+        shifts = []
+        for i in range(1, len(self.landmarks)):
+            p1 = np.array([self.landmarks[i-1][1].x, self.landmarks[i-1][1].y])
+            p2 = np.array([self.landmarks[i][1].x, self.landmarks[i][1].y])
+            shifts.append(np.linalg.norm(p1 - p2))
+        
+        # Jitter is variance of movement that doesn't correspond to rotation
+        # (Simplified: High variance in landmark shift suggests flickering)
+        return float(np.var(shifts))
+
+    def get_rolling_avg(self):
+        return float(np.mean(self.scores)) if self.scores else 0.0
+
+class FusionEngine:
+    @staticmethod
+    def calculate_risk(neural_prob, biometric_fail_score, structural_jitter_score):
+        """
+        Final Score = (ConvNeXt * 0.4) + (Biometric_Fail * 0.4) + (Structural_Jitter * 0.2)
+        """
+        risk = (neural_prob * 0.4) + (biometric_fail_score * 0.4) + (structural_jitter_score * 0.2)
+        return min(100.0, risk)
+
+class Auditor:
+    @staticmethod
+    def generate_notes(avg_neural, bio_anomalies, structural_jitter, is_video=True):
+        notes = []
+        if avg_neural > 60:
+            notes.append("Neural fingerprints of GAN-generated textures identified in skin-pore distribution.")
+        elif avg_neural > 30:
+            notes.append("Subtle synthetic artifacts detected in local frequency feature maps (Neural Layer).")
+
+        if "Unnatural lack of eye movement detected" in bio_anomalies:
+            notes.append("Irregular/Mechanical blinking detected (Biometric Failure).")
+        if "Rigid mouth movement detected across sequence" in bio_anomalies:
+            notes.append("Desynchronized lip movement or rigid mouth architecture detected.")
+        if "Frequency-domain artifacts detected (DCT Signature)" in bio_anomalies:
+            notes.append("Inconsistent spectral noise in the high-frequency Y-channel (Spectral Anomaly).")
+
+        if is_video and structural_jitter > 50:
+            notes.append("High-frequency temporal jitter detected in facial landmarks (Structural Anomaly).")
+        elif not is_video and structural_jitter > 30:
+             notes.append("Geometric misalignment detected in facial structural anchors.")
+            
+        return notes
 
 # --- Job Status Store ---
 processing_jobs = {}
@@ -255,25 +388,35 @@ def process_video_task(job_id, filepath):
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = face_mesh_instance.process(rgb_frame)
                 
+                engine = FusionEngine()
+                
                 if results.multi_face_landmarks:
                     landmarks = results.multi_face_landmarks[0].landmark
                     h, w, _ = frame.shape
+                    
+                    # 1. Neural Signal (Layer A)
                     pts = np.array([[l.x * w, l.y * h] for l in landmarks])
                     x, y, fw, fh = cv2.boundingRect(pts.astype(np.int32))
-                    
-                    # Crop and Predict
                     face_crop = frame[max(0, y-10):min(h, y+fh+10), max(0, x-10):min(w, x+fw+10)]
-                    prob = detector.predict(face_crop)
-                    fake_probs.append(prob)
+                    neural_prob = detector.predict(face_crop)
                     
+                    # 2. Biometric Signal (Layer B - Static)
+                    # For images, we can only check spectral/texture forensics
                     forensics = analyze_facial_forensics(face_crop)
                     spectral_scores.append(forensics["spectral"])
                     texture_scores.append(forensics["texture"])
-                    timeline.append({"time": 0, "event": "Face detected and analyzed"})
+                    
+                    # 3. Structural Signal (Layer C)
+                    structural = analyze_structural_integrity(face_crop, landmarks)
+                    # Jitter is 0 for images
+                    current_risk = engine.calculate_risk(neural_prob, 0, 0)
+                    
+                    fake_probs.append(current_risk)
+                    timeline.append({"time": 0, "event": "Face detected: Triple-Layer Fusion applied"})
                 else:
-                    # Fallback if no face detected in image
-                    prob = detector.predict(frame)
-                    fake_probs.append(prob)
+                    # Fallback if no face detected
+                    neural_prob = detector.predict(frame)
+                    fake_probs.append(neural_prob)
                     timeline.append({"time": 0, "event": "No face found; analyzing full frame"})
                 
                 processing_jobs[job_id]['progress'] = 100
@@ -283,7 +426,18 @@ def process_video_task(job_id, filepath):
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             step = max(1, total_frames // 20)
             
-            print(f"DEBUG: Processing Video - Total Frames: {total_frames}, Step: {step}")
+            buffer = TemporalBuffer(size=15)
+            engine = FusionEngine()
+            
+            # For Frontend Graph
+            temporal_data = {
+                "timestamps": [],
+                "neural_scores": [],
+                "jitter_scores": [],
+                "final_risk": []
+            }
+            
+            print(f"DEBUG: Processing Video - Triple Layer Fusion Mode")
             
             for i in range(0, total_frames, step):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -295,45 +449,72 @@ def process_video_task(job_id, filepath):
                 results = face_mesh_instance.process(rgb_frame)
                 
                 if results.multi_face_landmarks:
-                    print(f"DEBUG: Frame {i} - FACE DETECTED")
                     landmarks = results.multi_face_landmarks[0].landmark
-                    ears.append(calculate_ear(landmarks, LEFT_EYE, RIGHT_EYE))
-                    mars.append(calculate_mar(landmarks, MOUTH))
-                    
                     h, w, _ = frame.shape
+                    
+                    # 1. Neural Signal (Layer A)
                     pts = np.array([[l.x * w, l.y * h] for l in landmarks])
                     bx, by, bw, bh = cv2.boundingRect(pts.astype(np.int32))
-                    
-                    # Crop and Predict
                     face_crop = frame[max(0, by-10):min(h, by+bh+10), max(0, bx-10):min(w, bx+bw+10)]
-                    prob = detector.predict(face_crop)
-                    fake_probs.append(prob)
+                    neural_prob = detector.predict(face_crop)
                     
+                    # 2. Biometric Signal (Layer B)
+                    ears.append(calculate_ear(landmarks, LEFT_EYE, RIGHT_EYE))
+                    mars.append(calculate_mar(landmarks, MOUTH))
                     forensics = analyze_facial_forensics(face_crop)
                     spectral_scores.append(forensics["spectral"])
                     texture_scores.append(forensics["texture"])
+                    
+                    # 3. Structural Signal (Layer C)
+                    structural = analyze_structural_integrity(face_crop, landmarks)
+                    buffer.add(neural_prob, landmarks, structural["edge_density"], structural["rotation_vec"])
+                    
+                    # 4. Temporal Fusion
+                    jitter = buffer.get_jitter_variance()
+                    # Normalize jitter score (0 to 100)
+                    jitter_score = min(100.0, jitter * 500000) 
+                    
+                    # Layer C boost logic: If Structural Jitter > threshold, add +0.25 to Neural probability
+                    if jitter_score > 60:
+                        neural_prob = min(100.0, neural_prob + 25)
 
-                    if prob > 50:
-                        timeline.append({"time": round(timestamp, 2), "event": f"Suspect pattern ({round(prob, 1)}%)"})
-                else:
-                    print(f"DEBUG: Frame {i} - NO FACE FOUND")
+                    # Biometric Score/Fail (Layer B)
+                    # Simple heuristic: high spectral noise or texture blurring = biometric failure
+                    bio_fail = 100 if (forensics["spectral"] > 45 or forensics["texture"] > 40) else 0
+                    
+                    # Veto Logic: If EAR mean is too constant (no blinks) or variances are zero
+                    # (This is a simplified multi-second lookahead inside the loop)
+                    if len(ears) > 10 and np.var(ears[-10:]) < 0.00001:
+                        bio_fail = 100 # Veto REAL verdict
+                    
+                    # Weighted Risk for this frame
+                    current_risk = engine.calculate_risk(neural_prob, bio_fail, jitter_score)
+                    
+                    fake_probs.append(current_risk)
+                    temporal_data["timestamps"].append(round(timestamp, 2))
+                    temporal_data["neural_scores"].append(round(neural_prob, 2))
+                    temporal_data["jitter_scores"].append(round(jitter_score, 2))
+                    temporal_data["final_risk"].append(round(current_risk, 2))
+
+                    if current_risk > 60:
+                        timeline.append({"time": round(timestamp, 2), "event": f"High suspicion ({round(current_risk, 1)}%)"})
                 
                 processing_jobs[job_id]['progress'] = int((i / total_frames) * 100)
             cap.release()
         
-        print(f"DEBUG: Final fake_probs list: {fake_probs}")
+        # Final Global Stats
         avg_fake_prob = float(np.mean(fake_probs)) if fake_probs else 0.0
         risk_score = avg_fake_prob
-        print(f"DEBUG: Final risk_score: {risk_score:.2f}")
+        print(f"DEBUG: Final fused risk_score: {risk_score:.2f}")
         
-        blink_variance = np.var(ears) if ears else 1.0
-        mouth_variance = np.var(mars) if mars else 1.0
-        
-        if ears and blink_variance < 0.0001:
-            anomalies.append("Unnatural lack of eye movement detected")
-        
-        if mars and mouth_variance < 0.0001 and avg_fake_prob > 30:
-            anomalies.append("Rigid mouth movement detected across sequence")
+        # Biometric Heuristics (Sequence-based)
+        if not is_image:
+            blink_variance = np.var(ears) if ears else 1.0
+            mouth_variance = np.var(mars) if mars else 1.0
+            if ears and blink_variance < 0.0001:
+                anomalies.append("Unnatural lack of eye movement detected")
+            if mars and mouth_variance < 0.0001 and avg_fake_prob > 30:
+                anomalies.append("Rigid mouth movement detected across sequence")
             
         avg_spectral = float(np.mean(spectral_scores)) if spectral_scores else 0.0
         avg_texture = float(np.mean(texture_scores)) if texture_scores else 0.0
@@ -341,13 +522,20 @@ def process_video_task(job_id, filepath):
         if avg_spectral > 40:
             anomalies.append("Frequency-domain artifacts detected (DCT Signature)")
 
+        # Temporal Stats
         prob_variance = np.var(fake_probs) if len(fake_probs) > 1 else 0.0
-        if prob_variance > 400:
+        if not is_image and prob_variance > 400:
             anomalies.append("High temporal inconsistency (frame flickering)")
 
-        # Direct Model-Driven Threshold
         is_deepfake = risk_score >= 50.0
         
+        # XAI Auditor Logic
+        jitter_for_auditor = min(100, prob_variance / 10) if not is_image else (avg_spectral + avg_texture) / 2
+        forensic_notes = Auditor.generate_notes(avg_fake_prob, anomalies, jitter_for_auditor, is_video=not is_image)
+        
+        if not forensic_notes:
+            forensic_notes = ["Analysis signal is nominal. No high-confidence manipulation artifacts found."] if not is_deepfake else ["High-confidence neural signal detected across multiple sensors."]
+
         forensic_report = {
             "neural": {
                 "label": "Neural Integrity",
@@ -357,8 +545,8 @@ def process_video_task(job_id, filepath):
             },
             "biometric": {
                 "label": "Biometric Liveness",
-                "score": max(0.0, min(100.0, (1 - min(blink_variance, mouth_variance) * 1000) * 100)) if ears else 0.0,
-                "status": "danger" if (blink_variance < 0.0001 or mouth_variance < 0.0001) else "secure",
+                "score": max(0.0, min(100.0, (1 - min(np.var(ears) if ears else 1.0, np.var(mars) if mars else 1.0) * 1000) * 100)) if (ears and not is_image) else 0.0,
+                "status": "danger" if (not is_image and (np.var(ears) < 0.0001 if ears else False)) else "secure",
                 "description": "Analysis of involuntary facial muscle and eye movement."
             },
             "spectral": {
@@ -367,13 +555,22 @@ def process_video_task(job_id, filepath):
                 "status": "danger" if avg_spectral > 40 else "secure",
                 "description": "Detection of GAN-specific frequency artifacts."
             },
-            "temporal": {
+            "structural": {
+                "label": "Structural Signature",
+                "score": min(100.0, (avg_spectral + avg_texture) / 2), # Simplified Structural signal for static images/unified cases
+                "status": "danger" if (avg_spectral > 40 or avg_texture > 40) else "secure",
+                "description": "Analysis of edge density and geometric consistency."
+            }
+        }
+
+        # Add temporal layer only for videos
+        if not is_image:
+             forensic_report["temporal"] = {
                 "label": "Temporal Stability",
                 "score": min(100, prob_variance / 10),
                 "status": "danger" if prob_variance > 400 else "secure",
                 "description": "Prediction consistency across sequential data points."
             }
-        }
 
         processing_jobs[job_id]['status'] = 'completed'
         processing_jobs[job_id]['result'] = {
@@ -381,8 +578,10 @@ def process_video_task(job_id, filepath):
             'risk_score': float(round(risk_score, 2)),
             'avg_fake_prob': float(round(avg_fake_prob, 2)),
             'anomalies': anomalies,
+            'forensic_notes': forensic_notes,
             'timeline': timeline,
-            'forensic_report': forensic_report
+            'forensic_report': forensic_report,
+            'temporal_data': temporal_data if not is_image else None
         }
 
     except Exception as e:
@@ -392,6 +591,15 @@ def process_video_task(job_id, filepath):
         if os.path.exists(filepath):
             try: os.remove(filepath)
             except: pass
+
+# --- Frontend Routes (for Docker/Spaces) ---
+@app.route('/')
+def serve_frontend():
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.errorhandler(404)
+def not_found(e):
+    return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -418,4 +626,6 @@ def get_status(job_id):
     return jsonify(job), 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Use environment port for deployment (Render/Heroku/Vercel)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

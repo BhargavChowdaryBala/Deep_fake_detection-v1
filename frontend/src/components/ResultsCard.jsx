@@ -1,5 +1,29 @@
 import React, { useEffect, useState } from 'react';
-import { ShieldCheck, ShieldAlert, TrendingUp, FileType, Clock, Lightbulb, Activity } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, TrendingUp, FileType, Clock, Lightbulb, Activity, LineChart as ChartIcon, Terminal } from 'lucide-react';
+import ExplanationHUD from './ExplanationHUD.jsx';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler
+} from 'chart.js';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler
+);
 
 export default function ResultsCard({ result }) {
   const [animatedConfidence, setAnimatedConfidence] = useState(0);
@@ -122,6 +146,11 @@ export default function ResultsCard({ result }) {
                 </div>
             </div>
         )}
+        
+        {/* XAI Explanation HUD */}
+        {result.forensicNotes && (
+            <ExplanationHUD notes={result.forensicNotes} />
+        )}
 
         {/* Forensic Anomalies */}
         {result.anomalies && result.anomalies.length > 0 && (
@@ -136,6 +165,71 @@ export default function ResultsCard({ result }) {
                             {an}
                         </div>
                     ))}
+                </div>
+            </div>
+        )}
+
+        {/* Live Stability Graph (Only for Video) */}
+        {result.temporalData && (
+            <div className="flex flex-col gap-3 h-44 sm:h-52">
+                <span className="flex items-center gap-2 text-white/30 text-[10px] font-bold uppercase tracking-[0.2em]">
+                    <ChartIcon className="w-3 h-3" /> Live Temporal Stability Graph
+                </span>
+                <div className="flex-1 bg-white/[0.012] border border-white/[0.04] p-3 rounded-xl overflow-hidden">
+                    <Line 
+                        data={{
+                            labels: result.temporalData.timestamps,
+                            datasets: [
+                                {
+                                    label: 'Final Risk Signal',
+                                    data: result.temporalData.final_risk,
+                                    borderColor: '#f87171',
+                                    backgroundColor: 'rgba(248, 113, 113, 0.1)',
+                                    fill: true,
+                                    tension: 0.4,
+                                    borderWidth: 2,
+                                    pointRadius: 0
+                                },
+                                {
+                                    label: 'Neural Signal',
+                                    data: result.temporalData.neural_scores,
+                                    borderColor: '#00d4ff',
+                                    borderWidth: 1.5,
+                                    pointRadius: 0,
+                                    tension: 0.4
+                                },
+                                {
+                                    label: 'Structural Jitter',
+                                    data: result.temporalData.jitter_scores,
+                                    borderColor: '#fbbf24',
+                                    borderWidth: 1,
+                                    borderDash: [3, 3],
+                                    pointRadius: 0,
+                                    tension: 0.4
+                                }
+                            ]
+                        }}
+                        options={{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { 
+                                legend: { 
+                                    display: true, 
+                                    position: 'top',
+                                    labels: { color: 'rgba(255,255,255,0.3)', font: { size: 8 }, boxWidth: 10 }
+                                }, 
+                                tooltip: { mode: 'index', intersect: false } 
+                            },
+                            scales: {
+                                x: { display: false },
+                                y: { 
+                                    min: 0, max: 100, 
+                                    grid: { display: true, color: 'rgba(255,255,255,0.02)' },
+                                    ticks: { color: 'rgba(255,255,255,0.1)', font: { size: 8 } }
+                                }
+                            }
+                        }}
+                    />
                 </div>
             </div>
         )}
