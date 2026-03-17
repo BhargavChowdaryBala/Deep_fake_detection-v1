@@ -625,14 +625,18 @@ def process_video_task(job_id, filepath):
             try: os.remove(filepath)
             except: pass
 
-# --- Frontend Routes (for Docker/Spaces) ---
+# --- API Routes ---
 @app.route('/')
-def serve_frontend():
-    return send_from_directory(app.static_folder, 'index.html')
+def api_status():
+    return jsonify({
+        "status": "online",
+        "message": "DeepShield AI API is running. Use the Vercel dashboard for the UI.",
+        "version": "1.0.0"
+    }), 200
 
 @app.errorhandler(404)
 def not_found(e):
-    return send_from_directory(app.static_folder, 'index.html')
+    return jsonify({"error": "Resource not found"}), 404
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
